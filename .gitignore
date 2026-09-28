@@ -1,0 +1,9 @@
+# 変数ファイル（接続 ARN・シークレット ARN 等を含むためコミットしない）
+terraform.tfvars
+
+# state / plan
+*.tfstate*
+*.tfplan
+
+# provider / module キャッシュ
+.terraform/

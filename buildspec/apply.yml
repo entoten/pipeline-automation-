@@ -1,0 +1,78 @@
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  install:
+    commands:
+      - curl -sSfL "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip" -o /tmp/tf.zip
+      - unzip -o -q /tmp/tf.zip -d /usr/local/bin
+      - terraform version
+      - command -v jq >/dev/null || dnf install -y -q jq
+
+  build:
+    commands:
+      - cd "${CODEBUILD_SRC_DIR}/${TF_WORKING_DIR}"
+      - |
+        if [ "${HAS_CHANGES}" != "true" ]; then
+          echo "差分なしのため apply をスキップします" | tee /tmp/apply.txt
+          echo skipped > /tmp/apply_status
+        else
+          # plan ステージで作った tfplan をそのまま適用（state が進んでいれば stale エラーで止まる）
+          terraform init -input=false -no-color > /tmp/apply.txt 2>&1 \
+            && terraform apply -input=false -no-color -auto-approve "${CODEBUILD_SRC_DIR_PlanOutput}/tfplan" >> /tmp/apply.txt 2>&1
+          rc=$?
+          cat /tmp/apply.txt
+          if [ $rc -eq 0 ]; then echo applied > /tmp/apply_status; fi
+          test $rc -eq 0
+        fi
+
+  post_build:
+    commands:
+      - |
+        if [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_ISSUE_NUMBER:-}" ]; then
+          status=$(cat /tmp/apply_status 2>/dev/null || echo failed)
+          case "${status}" in
+            applied) title="✅ Terraform Apply 成功" ;;
+            skipped) title="ℹ️ 差分なし（Apply スキップ）" ;;
+            *)       title="❌ Terraform Apply 失敗" ;;
+          esac
+          plan_file="${CODEBUILD_SRC_DIR_PlanOutput}/plan.txt"
+          plan_summary=$(grep -E '^(Plan:|No changes\.)' "${plan_file}" 2>/dev/null | head -1)
+          apply_summary=$(grep -E '^(Apply complete!|Error:)' /tmp/apply.txt 2>/dev/null | head -1)
+          {
+            echo "## ${title}"
+            echo ""
+            echo "| 項目 | 値 |"
+            echo "|---|---|"
+            echo "| Commit | \`${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}\` |"
+            echo "| Execution | \`${PIPELINE_EXECUTION_ID:-n/a}\` |"
+            echo "| Plan | ${plan_summary:-n/a} |"
+            echo "| Apply | ${apply_summary:-n/a} |"
+            echo "| Build log | ${CODEBUILD_BUILD_URL} |"
+            echo ""
+            echo "<details><summary>Plan 出力</summary>"
+            echo ""
+            echo '```'
+            tail -c 30000 "${plan_file}" 2>/dev/null || echo "(なし)"
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "<details><summary>Apply 出力</summary>"
+            echo ""
+            echo '```'
+            tail -c 30000 /tmp/apply.txt 2>/dev/null || echo "(なし)"
+            echo '```'
+            echo "</details>"
+          } > /tmp/comment.md
+          jq -Rs '{body: .}' /tmp/comment.md > /tmp/payload.json
+          curl -sS -o /dev/null -w "GitHub API: %{http_code}\n" -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPO}/issues/${GITHUB_ISSUE_NUMBER}/comments" \
+            -d @/tmp/payload.json || true
+        else
+          echo "GitHub 通知は無効です"
+        fi
