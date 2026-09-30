@@ -1,0 +1,13 @@
+name            = "tf-auto-pipeline"
+connection_arn  = "arn:aws:codeconnections:ap-northeast-1:123456789012:connection/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+repository_id   = "your-org/your-infra-repo"
+branch          = "main"
+tf_working_dir  = "envs/dev"
+tf_state_bucket = "your-tfstate-bucket"
+
+# enable_manual_approval = true
+
+# GitHub Issue 通知（使う場合だけ）
+# github_token_secret_arn = "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:github-issue-token-AbCdEf"
+# github_issue_repo       = "your-org/your-infra-repo"
+# github_issue_number     = 42

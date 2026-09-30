@@ -1,0 +1,77 @@
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    HAS_CHANGES: "false"
+  exported-variables:
+    - HAS_CHANGES
+
+phases:
+  install:
+    commands:
+      - curl -sSfL "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip" -o /tmp/tf.zip
+      - unzip -o -q /tmp/tf.zip -d /usr/local/bin
+      - terraform version
+      - command -v jq >/dev/null || dnf install -y -q jq
+
+  build:
+    commands:
+      - cd "${CODEBUILD_SRC_DIR}/${TF_WORKING_DIR}"
+      - |
+        terraform init -input=false -no-color 2>&1 | tee /tmp/tf.log
+        test "${PIPESTATUS[0]}" -eq 0
+      - |
+        terraform validate -no-color 2>&1 | tee -a /tmp/tf.log
+        test "${PIPESTATUS[0]}" -eq 0
+      - |
+        # -detailed-exitcode: 0=差分なし / 1=エラー / 2=差分あり
+        terraform plan -input=false -no-color -lock-timeout=5m -detailed-exitcode -out=tfplan > /tmp/plan.txt 2>&1
+        rc=$?
+        cat /tmp/plan.txt
+        cat /tmp/plan.txt >> /tmp/tf.log
+        if [ $rc -eq 0 ] || [ $rc -eq 2 ]; then
+          if [ $rc -eq 2 ]; then export HAS_CHANGES=true; else export HAS_CHANGES=false; fi
+          echo "HAS_CHANGES=${HAS_CHANGES}"
+          mkdir -p "${CODEBUILD_SRC_DIR}/plan-out"
+          cp tfplan /tmp/plan.txt "${CODEBUILD_SRC_DIR}/plan-out/"
+        else
+          echo "terraform plan failed (exit=${rc})"
+          false
+        fi
+
+  post_build:
+    commands:
+      # plan 失敗時のみ Issue に通知（成功時は apply 側でまとめて通知）
+      - |
+        if [ "${CODEBUILD_BUILD_SUCCEEDING}" = "0" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ -n "${GITHUB_ISSUE_NUMBER:-}" ]; then
+          {
+            echo "## ❌ Terraform Plan 失敗"
+            echo ""
+            echo "| 項目 | 値 |"
+            echo "|---|---|"
+            echo "| Commit | \`${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}\` |"
+            echo "| Execution | \`${PIPELINE_EXECUTION_ID:-n/a}\` |"
+            echo "| Build log | ${CODEBUILD_BUILD_URL} |"
+            echo ""
+            echo "<details><summary>出力（末尾）</summary>"
+            echo ""
+            echo '```'
+            tail -c 60000 /tmp/tf.log 2>/dev/null || echo "(出力なし: install フェーズ等で失敗)"
+            echo '```'
+            echo "</details>"
+          } > /tmp/comment.md
+          jq -Rs '{body: .}' /tmp/comment.md > /tmp/payload.json
+          curl -sS -o /dev/null -w "GitHub API: %{http_code}\n" -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPO}/issues/${GITHUB_ISSUE_NUMBER}/comments" \
+            -d @/tmp/payload.json || true
+        fi
+
+artifacts:
+  base-directory: plan-out
+  files:
+    - tfplan
+    - plan.txt
